@@ -38,10 +38,9 @@ type (
     }
 
     subscriptionStruct struct {
-        ID     string   "_id,omitempty"
-        FilmId string `bson:"film_id"`
+        ID         string   "_id,omitempty"
+        FilmId     string `bson:"film_id"`
         TelegramId int64 `bson:"telegramid"`
-        Status string `bson:status`
     }
 
     userStruct struct {
@@ -110,7 +109,7 @@ var (
 
     conf Config
     siteUrl = "http://portalcinema.com.ua/"
-    //siteImagePath = "uploads/products/main/"
+//siteImagePath = "uploads/products/main/"
 
     dayNames = map[string]string{
         "1": "Понедельник",
@@ -356,12 +355,26 @@ func getFilmMessage(id string) (message string) {
     }else {
         message = "Фильм не найден"
     }
-
     return
 }
 
-func remindFilm(id string) (message string) {
-    message = concat(message, "*Under construction*")
+func remindFilm(id string, TelegramId int64) (message string) {
+    session := getSession()
+    defer session.Close()
+    c := session.DB(conf.MongoDB).C("Subscriptions")
+    count, _ := c.Find(bson.M{"telegramid" : TelegramId, "film_id": id}).Limit(1).Count()
+    if (count == 0) {
+        mongoError = c.Insert(&subscriptionStruct{
+            FilmId: id,
+            TelegramId: TelegramId})
+        if(mongoError == nil){
+            message = "Подписка оформлена"
+        } else {
+            message = "Ошибка сохранения. Попробуйте еще раз."
+        }
+    } else {
+        message = "Вы уже подписаны на этот фильм"
+    }
     return
 }
 
@@ -406,7 +419,7 @@ func (user userStruct) subscribe() bool {
     defer session.Close()
     c := session.DB(conf.MongoDB).C("Users")
     mongoError = c.Insert(&user)
-    if(mongoError == nil){
+    if (mongoError == nil) {
         return true
     }
     return false
@@ -417,23 +430,51 @@ func (user userStruct) isSubscribed() bool {
     defer session.Close()
     c := session.DB(conf.MongoDB).C("Users")
     count, _ := c.Find(bson.M{"telegramid" : user.TelegramId}).Limit(1).Count()
-    if(count > 0){
+    if (count > 0) {
         return true
     }
     return false
 }
 
-func getHelpMessage() string{
+func getHelpMessage() string {
     return "*Список фильмов:* /all\n*Анонс:* /announcement\n*Напоминания:* /remind\n*Помощь:* /help\n*Отменить подписку:* /stop"
 }
 
-func (user userStruct) unsubscribe(){
+func (user userStruct) unsubscribe() {
     session := getSession()
     defer session.Close()
     c := session.DB(conf.MongoDB).C("Users")
     c.RemoveAll(bson.M{"telegramid": user.TelegramId})
     c = session.DB(conf.MongoDB).C("Subscriptions")
     c.RemoveAll(bson.M{"telegramid": user.TelegramId})
+}
+
+func getReminds(userId int64) (message string){
+    subscriptions := []subscriptionStruct{}
+    //films := []filmStruct{}
+    filmIds := []string{}
+    session := getSession()
+    defer session.Close()
+    c := session.DB(conf.MongoDB).C("Subscriptions")
+    c.Find(bson.M{"telegramid": userId}).All(&subscriptions)
+
+    if(len(subscriptions)>0){
+        for _, subscription := range (subscriptions) {
+            filmIds = append(filmIds, subscription.FilmId)
+        }
+        fmt.Println(filmIds)
+        // following code doesn't work TODO: find solution
+        //if(len(filmIds)>0){
+        //    c = session.DB(conf.MongoDB).C("Films")
+        //    c.Find(bson.M{"film_id": bson.M{"$in": filmIds}}).All(&films)
+        //    fmt.Println(len(films));
+        //} else {
+        //    message = "Список напоминаний пуст."
+        //}
+    } else {
+       message = "Список напоминаний пуст."
+    }
+    return
 }
 
 func main() {
@@ -472,8 +513,9 @@ func main() {
                 }
             case "remind" :
                 if args != "" {
-                    msg.Text = remindFilm(args)
+                    msg.Text = remindFilm(args, update.Message.Chat.ID)
                 }
+            case "myreminds" : msg.Text = getReminds(update.Message.Chat.ID)
             case "help" :
                 msg.Text = getHelpMessage()
             case "stop":
@@ -485,10 +527,10 @@ func main() {
                 msg.Text = getFooterLinks()
             }
         } else {
-            if(command == "start"){
-                if(user.subscribe()){
+            if (command == "start") {
+                if (user.subscribe()) {
                     msg.Text = getHelpMessage()
-                }else{
+                }else {
                     msg.Text = "/start /stop"
                 }
             }else {
