@@ -1,0 +1,8 @@
+{
+  "mongoHost" : "MONGO_HOST",
+  "mongoDB": "MONGO_DB",
+  "mongoUser": "MONGO_USER",
+  "mongoPassword": "MONGO_PASSWORD",
+  "botId": "TELEGRAM_BOT_ID"
+}
+
