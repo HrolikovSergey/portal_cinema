@@ -14,11 +14,10 @@ import (
     "strings"
     "sort"
     "strconv"
-//    "gopkg.in/telegram-bot-api.v4"
-    "./tgbotapi"
+    "gopkg.in/telegram-bot-api.v4"
     "gopkg.in/mgo.v2"
     "gopkg.in/mgo.v2/bson"
-//    "gopkg.in/robfig/cron.v2"
+    "gopkg.in/robfig/cron.v2"
 )
 
 type (
@@ -104,7 +103,6 @@ var (
 
     conf Config
     siteUrl = "http://portalcinema.com.ua/"
-//siteImagePath = "uploads/products/main/"
 
     dayNames = map[string]string{
         "1": "Понедельник",
@@ -182,11 +180,20 @@ func updateFilms() {
     defer session.Close()
     c := session.DB(conf.MongoDB).C("Films")
     c.RemoveAll(nil)
+    subscriptions := []subscriptionStruct{}
     for _, film := range loadFilms(filmRegExp[0]) {
         film.Status = "current"
         mongoError = c.Insert(&film)
         if (mongoError != nil) {
             log("Cant save 'current' film")
+        } else {
+            s := session.DB(conf.MongoDB).C("Subscriptions")
+            s.Find(bson.M{"film_id" : film.Result.ID}).All(&subscriptions)
+            if(len(subscriptions)>0){
+                for i:= range(subscriptions) {
+                    remindUser(subscriptions[i].TelegramId, film)
+                }
+            }
         }
     }
     for _, film := range loadFilms(filmRegExp[1]) {
@@ -310,7 +317,7 @@ func getFilmInfo(id string) (film *filmStruct) {
 }
 
 func getFooterLinks() string {
-    return "\n*Все фильмы:* /all  *Анонс:* /announcement  *Помощь:* /help"
+    return "\n*Все фильмы:* /all  *Анонс:* /announcement *Напоминания:* /myreminds *Помощь:* /help *Отписаться от обновлений:* /stop"
 }
 
 func getFilmMessage(id string) (message string) {
@@ -330,10 +337,11 @@ func getFilmMessage(id string) (message string) {
         } else {
             message = concat(message, "*Напомнить:* /remind", commandDelimiter, film.Result.ID, "\n")
         }
-        message = concat(message, stripTags(film.Result.Info.Description), getFooterLinks())
+        message = concat(message, stripTags(film.Result.Info.Description), "\n")
     }else {
-        message = "Фильм не найден"
+        message = "Фильм не найден\n"
     }
+    message = concat(message, getFooterLinks())
     return
 }
 
@@ -347,13 +355,14 @@ func remindFilm(id string) (message string) {
             FilmId: id,
             TelegramId: user.TelegramId})
         if (mongoError == nil) {
-            message = "Подписка оформлена"
+            message = "Подписка оформлена\n"
         } else {
-            message = "Ошибка сохранения. Попробуйте еще раз."
+            message = "Ошибка сохранения. Попробуйте еще раз.\n"
         }
     } else {
-        message = "Вы уже подписаны на этот фильм"
+        message = "Вы уже подписаны на этот фильм\n"
     }
+    message = concat(message, getFooterLinks())
     return
 }
 
@@ -465,11 +474,12 @@ func getReminds() (message string) {
                     " *Отменить напоминание:* ", "/cancel", commandDelimiter, film.Result.ID, "\n\n")
             }
         } else {
-            message = "Список напоминаний пуст."
+            message = "Список напоминаний пуст.\n"
         }
     } else {
-        message = "Список напоминаний пуст."
+        message = "Список напоминаний пуст.\n"
     }
+    message = concat(message, getFooterLinks())
     return
 }
 
@@ -477,12 +487,12 @@ func removeNotification(id string) string {
     session := getSession()
     defer session.Close()
     c := session.DB(conf.MongoDB).C("Subscriptions")
-    fmt.Println(c.RemoveAll(bson.M{"film_id": id, "telegramid": user.TelegramId}))
-    return "Подписка отменена"
+    c.RemoveAll(bson.M{"film_id": id, "telegramid": user.TelegramId})
+    return concat("Подписка отменена\n", getFooterLinks())
 }
 
 func initMessage() string {
-    return "Для начала общения с ботом используйте команду /start\nДля отменя подписки на рьновления используйте команду /stop"
+    return "Для подписки на обновления используйте команду /start\nДля отмены подписки на обновления используйте команду /stop"
 }
 
 
@@ -502,14 +512,13 @@ func main() {
     if err != nil {
         panic(err)
     }
-    //if conf.FilmsUpdateFreequency != "" {
-    //    c := cron.New()
-    //    c.AddFunc(conf.FilmsUpdateFreequency, func() {
-    //        updateFilms()
-    //    })
-    //    c.Start()
-    //}
-
+    if conf.FilmsUpdateFreequency != "" {
+        c := cron.New()
+        c.AddFunc(conf.FilmsUpdateFreequency, func() {
+            updateFilms()
+        })
+        c.Start()
+    }
 
     fmt.Printf("Authorized on account %s\n", bot.Self.UserName)
 
@@ -552,7 +561,7 @@ func main() {
                 msg.Text = getHelpMessage()
             case "stop":
                 user.unsubscribe()
-                msg.Text = "Bye message"
+                msg.Text = "Вы больше не будете получать сообщения от бота"
             }
 
             if msg.Text == "" {
