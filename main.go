@@ -8,33 +8,28 @@ import (
     "io/ioutil"
     "encoding/json"
     "regexp"
-    "gopkg.in/mgo.v2"
-    "gopkg.in/mgo.v2/bson"
     "time"
     "sync"
     "bytes"
     "strings"
     "sort"
-//"gopkg.in/telegram-bot-api.v4"
+    "strconv"
+//    "gopkg.in/telegram-bot-api.v4"
     "./tgbotapi"
-//"reflect"
+    "gopkg.in/mgo.v2"
+    "gopkg.in/mgo.v2/bson"
+//    "gopkg.in/robfig/cron.v2"
 )
 
 type (
 
     Config struct {
-        MongoHost     string
-        MongoDB       string
-        MongoUser     string
-        MongoPassword string
-        BotId         string
-    }
-
-    settingsStruct struct {
-        _ID                         bson.ObjectId   `bson:"_id"`
-        LastUpdate                  time.Time `bson:"last_update"`
-        UpdateFreequency            int `bson:"update_freequency"`
-        SubscriptionCheckFreequency int `bson:"subscription_check_freequency"`
+        MongoHost             string
+        MongoDB               string
+        MongoUser             string
+        MongoPassword         string
+        BotId                 string
+        FilmsUpdateFreequency string
     }
 
     subscriptionStruct struct {
@@ -96,14 +91,14 @@ type (
 )
 
 var (
+    bot = &tgbotapi.BotAPI{}
+
     mongoDBDialInfo = &mgo.DialInfo{}
 
     filmRegExp = [2]string{"load_film_info\\(([0-9]+)\\);", "load_film_info\\(([0-9]+), 'anonce'\\);"}
 
     mongoSession *mgo.Session
-    mongoError error
-
-    settings settingsStruct
+    err, mongoError error
 
     commandDelimiter string = "@"
 
@@ -119,6 +114,8 @@ var (
         "5": "Пятница",
         "6": "Суббота",
         "7": "Воскресенье"}
+
+    user userStruct
 )
 
 func log(msg string) {
@@ -199,33 +196,6 @@ func updateFilms() {
             log(fmt.Sprintf("Cant save 'announce' film", mongoError))
         }
     }
-    updateLastUpdateTime() // lol
-}
-
-func updateLastUpdateTime() {
-    session := getSession()
-    defer session.Close()
-    c := session.DB(conf.MongoDB).C("Settings")
-    mongoError = c.Update(bson.M{}, bson.M{"$set": bson.M{"last_update": time.Now()}})
-    if (mongoError != nil) {
-        log(fmt.Sprintf("Cant update 'LastUpdate': %s", mongoError))
-    }
-    loadSettings()
-}
-
-func loadSettings() {
-    session := getSession()
-    defer session.Close()
-    c := session.DB(conf.MongoDB).C("Settings")
-    c.Find(bson.M{}).One(&settings)
-    if (settingsStruct{}) == settings {
-        var defaultSettings = settingsStruct{LastUpdate : time.Now(), UpdateFreequency : 86400, SubscriptionCheckFreequency : 10500}
-        mongoError = c.Insert(defaultSettings)
-        if (mongoError != nil) {
-            log(fmt.Sprintf("Can't save default settings: %s", mongoError))
-        }
-        settings = defaultSettings
-    }
 }
 
 func loadConfig() {
@@ -249,7 +219,6 @@ func loadConfig() {
 
 func init() {
     loadConfig()
-    loadSettings()
     films := []filmStruct{}
     session := getSession()
     defer session.Close()
@@ -306,8 +275,18 @@ func stripTags(str string) string {
 func getAllMessage() (message string) {
     films := searchFilms(bson.M{"status": "current"})
     for _, film := range films {
-        message = concat(message, "\n", "*", film.Result.Info.Title, "* (", fmt.Sprintf("%.1f", film.AvgRate), "\u2606", ")\n")
-        message = concat(message, "Подробнее: /info", commandDelimiter, film.Result.ID, " Сеансы: /seances", commandDelimiter, film.Result.ID, "\n")
+        message = concat(message,
+            "\n", "*",
+            film.Result.Info.Title,
+            "* (", fmt.Sprintf("%.1f", film.AvgRate),
+            "\u2606",
+            ")\nПодробнее: /info",
+            commandDelimiter,
+            film.Result.ID,
+            " Сеансы: /seances",
+            commandDelimiter,
+            film.Result.ID,
+            "\n")
     }
     return
 }
@@ -358,16 +337,16 @@ func getFilmMessage(id string) (message string) {
     return
 }
 
-func remindFilm(id string, TelegramId int64) (message string) {
+func remindFilm(id string) (message string) {
     session := getSession()
     defer session.Close()
     c := session.DB(conf.MongoDB).C("Subscriptions")
-    count, _ := c.Find(bson.M{"telegramid" : TelegramId, "film_id": id}).Limit(1).Count()
+    count, _ := c.Find(bson.M{"telegramid" : user.TelegramId, "film_id": id}).Limit(1).Count()
     if (count == 0) {
         mongoError = c.Insert(&subscriptionStruct{
             FilmId: id,
-            TelegramId: TelegramId})
-        if(mongoError == nil){
+            TelegramId: user.TelegramId})
+        if (mongoError == nil) {
             message = "Подписка оформлена"
         } else {
             message = "Ошибка сохранения. Попробуйте еще раз."
@@ -414,6 +393,19 @@ func (film filmStruct) endDate() string {
     return t.Format("02.01.2006")
 }
 
+func (film filmStruct) daysLeft() string {
+    start, _ := time.Parse("2006-01-02", film.Result.Start)
+    diff := int((start.Unix() - time.Now().Unix()) / 86400)
+    days := strconv.Itoa(diff)
+    switch diff {
+    case 0: days = "Сегодня"
+    case 1: days = concat(days, " день")
+    case 2, 3, 4: days = concat(days, " дня")
+    default: days = concat(days, " дней")
+    }
+    return days
+}
+
 func (user userStruct) subscribe() bool {
     session := getSession()
     defer session.Close()
@@ -437,7 +429,7 @@ func (user userStruct) isSubscribed() bool {
 }
 
 func getHelpMessage() string {
-    return "*Список фильмов:* /all\n*Анонс:* /announcement\n*Напоминания:* /remind\n*Помощь:* /help\n*Отменить подписку:* /stop"
+    return "*Список фильмов:* /all\n*Анонс:* /announcement\n*Напоминания:* /myreminds\n*Помощь:* /help\n*Отменить подписку:* /stop"
 }
 
 func (user userStruct) unsubscribe() {
@@ -449,53 +441,89 @@ func (user userStruct) unsubscribe() {
     c.RemoveAll(bson.M{"telegramid": user.TelegramId})
 }
 
-func getReminds(userId int64) (message string){
+func getReminds() (message string) {
     subscriptions := []subscriptionStruct{}
-    //films := []filmStruct{}
+    films := []filmStruct{}
     filmIds := []string{}
     session := getSession()
     defer session.Close()
     c := session.DB(conf.MongoDB).C("Subscriptions")
-    c.Find(bson.M{"telegramid": userId}).All(&subscriptions)
+    c.Find(bson.M{"telegramid": user.TelegramId}).All(&subscriptions)
 
-    if(len(subscriptions)>0){
+    if (len(subscriptions) > 0) {
         for _, subscription := range (subscriptions) {
             filmIds = append(filmIds, subscription.FilmId)
         }
-        fmt.Println(filmIds)
-        // following code doesn't work TODO: find solution
-        //if(len(filmIds)>0){
-        //    c = session.DB(conf.MongoDB).C("Films")
-        //    c.Find(bson.M{"film_id": bson.M{"$in": filmIds}}).All(&films)
-        //    fmt.Println(len(films));
-        //} else {
-        //    message = "Список напоминаний пуст."
-        //}
+        if (len(filmIds) > 0) {
+            c = session.DB(conf.MongoDB).C("Films")
+            c.Find(bson.M{"result.id": bson.M{"$in": filmIds}}).All(&films)
+            for _, film := range (films) {
+                message = concat(message, "*", film.Result.Info.Title, "*\n",
+                    "*Премьера:* ", film.startDate(),
+                    " *Осталось:* ", film.daysLeft(),
+                    "\n*Подробнее:* /info", commandDelimiter, film.Result.ID,
+                    " *Отменить напоминание:* ", "/cancel", commandDelimiter, film.Result.ID, "\n\n")
+            }
+        } else {
+            message = "Список напоминаний пуст."
+        }
     } else {
-       message = "Список напоминаний пуст."
+        message = "Список напоминаний пуст."
     }
     return
 }
 
+func removeNotification(id string) string {
+    session := getSession()
+    defer session.Close()
+    c := session.DB(conf.MongoDB).C("Subscriptions")
+    fmt.Println(c.RemoveAll(bson.M{"film_id": id, "telegramid": user.TelegramId}))
+    return "Подписка отменена"
+}
+
+func initMessage() string {
+    return "Для начала общения с ботом используйте команду /start\nДля отменя подписки на рьновления используйте команду /stop"
+}
+
+
+func remindUser(TelegramId int64, film filmStruct){
+    session := getSession()
+    defer session.Close()
+    c := session.DB(conf.MongoDB).C("Subscriptions")
+    c.RemoveAll(bson.M{"telegramid" : TelegramId, "film_id": film.Result.ID})
+    message := concat("*",film.Result.Title, "* cегодня выходит в прокат\n/info", commandDelimiter, film.Result.ID)
+    msg := tgbotapi.NewMessage(TelegramId, message)
+    msg.ParseMode = "Markdown"
+    bot.Send(msg)
+}
+
 func main() {
-    bot, err := tgbotapi.NewBotAPI(conf.BotId)
+    bot, err = tgbotapi.NewBotAPI(conf.BotId)
     if err != nil {
         panic(err)
     }
-    fmt.Printf("Authorized on account %s", bot.Self.UserName)
+    //if conf.FilmsUpdateFreequency != "" {
+    //    c := cron.New()
+    //    c.AddFunc(conf.FilmsUpdateFreequency, func() {
+    //        updateFilms()
+    //    })
+    //    c.Start()
+    //}
+
+
+    fmt.Printf("Authorized on account %s\n", bot.Self.UserName)
 
     u := tgbotapi.NewUpdate(0)
     u.Timeout = 60
 
-    updates, err := bot.GetUpdatesChan(u)
+    updates, _ := bot.GetUpdatesChan(u)
 
     for update := range updates {
-
         command := update.Message.Command()
         args := getCommandArguments(update.Message)
         msg := tgbotapi.NewMessage(update.Message.Chat.ID, "")
 
-        user := userStruct{
+        user = userStruct{
             Type: update.Message.Chat.Type,
             TelegramId: update.Message.Chat.ID,
             Name: update.Message.Chat.UserName}
@@ -513,9 +541,13 @@ func main() {
                 }
             case "remind" :
                 if args != "" {
-                    msg.Text = remindFilm(args, update.Message.Chat.ID)
+                    msg.Text = remindFilm(args)
                 }
-            case "myreminds" : msg.Text = getReminds(update.Message.Chat.ID)
+            case "myreminds" : msg.Text = getReminds()
+            case "cancel":
+                if args != "" {
+                    msg.Text = removeNotification(args)
+                }
             case "help" :
                 msg.Text = getHelpMessage()
             case "stop":
@@ -531,17 +563,13 @@ func main() {
                 if (user.subscribe()) {
                     msg.Text = getHelpMessage()
                 }else {
-                    msg.Text = "/start /stop"
+                    msg.Text = initMessage()
                 }
             }else {
-                msg.Text = "/start /stop"
+                msg.Text = initMessage()
             }
         }
         msg.ParseMode = "Markdown"
         bot.Send(msg)
     }
-
-    //updateTimer := time.NewTimer(time.Second * 2)
-    //<-updateTimer.C
-    //dosomething()
 }

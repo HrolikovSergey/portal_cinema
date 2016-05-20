@@ -3,6 +3,7 @@
   "mongoDB": "MONGO_DB",
   "mongoUser": "MONGO_USER",
   "mongoPassword": "MONGO_PASSWORD",
-  "botId": "TELEGRAM_BOT_ID"
+  "botId": "TELEGRAM_BOT_ID",
+  "filmsUpdateFreequency": "visit gopkg.in/robfig/cron.v2 for instructions"
 }
 
