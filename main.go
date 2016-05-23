@@ -515,12 +515,14 @@ func main() {
     if conf.FilmsUpdateFreequency != "" {
         c := cron.New()
         c.AddFunc(conf.FilmsUpdateFreequency, func() {
+            log("Updating films start")
             updateFilms()
+            log("Updating films end")
         })
         c.Start()
     }
 
-    fmt.Printf("Authorized on account %s\n", bot.Self.UserName)
+    log(fmt.Sprintf("Authorized on account %s",bot.Self.UserName))
 
     u := tgbotapi.NewUpdate(0)
     u.Timeout = 60
