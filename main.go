@@ -14,10 +14,12 @@ import (
     "strings"
     "sort"
     "strconv"
+    "reflect"
     "gopkg.in/telegram-bot-api.v4"
     "gopkg.in/mgo.v2"
     "gopkg.in/mgo.v2/bson"
-    "gopkg.in/robfig/cron.v2"
+//"gopkg.in/robfig/cron.v2"
+//"gopkg.in/robfig/cron.v2"
 )
 
 type (
@@ -29,6 +31,7 @@ type (
         MongoPassword         string
         BotId                 string
         FilmsUpdateFreequency string
+        Admins                []int64
     }
 
     subscriptionStruct struct {
@@ -42,6 +45,7 @@ type (
         Type       string `json:"type",bson:"type"`
         TelegramId int64  `json:"telegramid",bson:"telegramid"`
         Name       string `json:"name",bson:"name"`
+        IsAdmin    bool
     }
 
     scheduleStruct struct {
@@ -120,13 +124,19 @@ func log(msg string) {
     fmt.Println(time.Now().Format("2006-01-02 15:04:05"), msg)
 }
 
-func stringInSlice(a string, list []string) bool {
-    for _, b := range list {
-        if b == a {
-            return true
+func InSlice(val interface{}, slice interface{}) (exists bool) {
+    exists = false
+    switch reflect.TypeOf(slice).Kind() {
+    case reflect.Slice:
+        s := reflect.ValueOf(slice)
+        for i := 0; i < s.Len(); i++ {
+            if reflect.DeepEqual(val, s.Index(i).Interface()) == true {
+                exists = true
+                return
+            }
         }
     }
-    return false
+    return
 }
 
 func getFilmIds(regex string) (ids []string) {
@@ -136,7 +146,7 @@ func getFilmIds(regex string) (ids []string) {
     r, _ := regexp.Compile(regex)
     filmIds := r.FindAllStringSubmatch(string(body), -1)
     for key := range (filmIds) {
-        if !stringInSlice(filmIds[key][1], ids) {
+        if !InSlice(filmIds[key][1], ids) {
             ids = append(ids, filmIds[key][1])
         }
     }
@@ -189,8 +199,8 @@ func updateFilms() {
         } else {
             s := session.DB(conf.MongoDB).C("Subscriptions")
             s.Find(bson.M{"film_id" : film.Result.ID}).All(&subscriptions)
-            if(len(subscriptions)>0){
-                for i:= range(subscriptions) {
+            if (len(subscriptions) > 0) {
+                for i := range (subscriptions) {
                     remindUser(subscriptions[i].TelegramId, film)
                 }
             }
@@ -317,7 +327,7 @@ func getFilmInfo(id string) (film *filmStruct) {
 }
 
 func getFooterLinks() string {
-    return "\n*Все фильмы:* /all  *Анонс:* /announcement *Напоминания:* /myreminds *Помощь:* /help *Отписаться от обновлений:* /stop"
+    return "\n*Все фильмы:* /all  *Анонс:* /announcement *Напоминания:* /myreminds *Оставшиеся сеансы на сегодня:* /today *Помощь:* /help *Отписаться от обновлений:* /stop"
 }
 
 func getFilmMessage(id string) (message string) {
@@ -405,7 +415,7 @@ func (film filmStruct) endDate() string {
 func (film filmStruct) daysLeft() string {
     start, _ := time.Parse("2006-01-02", film.Result.Start)
     diff := int((start.Unix() - time.Now().Unix()) / 86400)
-    days := strconv.Itoa(diff)
+    days := strconv.Itoa(diff % 10)
     switch diff {
     case 0: days = "Сегодня"
     case 1: days = concat(days, " день")
@@ -438,7 +448,7 @@ func (user userStruct) isSubscribed() bool {
 }
 
 func getHelpMessage() string {
-    return "*Список фильмов:* /all\n*Анонс:* /announcement\n*Напоминания:* /myreminds\n*Помощь:* /help\n*Отменить подписку:* /stop"
+    return "*Список фильмов:* /all\n*Анонс:* /announcement\n*Напоминания:* /myreminds\n*Оставшиеся сеансы на сегодня:* /today\n*Помощь:* /help\n*Отменить подписку:* /stop"
 }
 
 func (user userStruct) unsubscribe() {
@@ -495,16 +505,77 @@ func initMessage() string {
     return "Для подписки на обновления используйте команду /start\nДля отмены подписки на обновления используйте команду /stop"
 }
 
-
-func remindUser(TelegramId int64, film filmStruct){
+func remindUser(TelegramId int64, film filmStruct) {
     session := getSession()
     defer session.Close()
     c := session.DB(conf.MongoDB).C("Subscriptions")
-    c.RemoveAll(bson.M{"telegramid" : TelegramId, "film_id": film.Result.ID})
-    message := concat("*",film.Result.Title, "* cегодня выходит в прокат\n/info", commandDelimiter, film.Result.ID)
+    message := concat("*", film.Result.Title, "* cегодня выходит в прокат\n/info", commandDelimiter, film.Result.ID)
     msg := tgbotapi.NewMessage(TelegramId, message)
     msg.ParseMode = "Markdown"
-    bot.Send(msg)
+    _, err := bot.Send(msg)
+    if(err == nil){
+        c.RemoveAll(bson.M{"telegramid" : TelegramId, "film_id": film.Result.ID})
+    } else {
+        //log(concat("Remind not sent: ", err, "UserID: ", strconv.Itoa(TelegramId)))
+    }
+}
+
+func timeToMinutes(start string) int {
+    parts := strings.Split(start, ":")
+    if (len(parts) == 2) {
+        hours, _ := strconv.Atoi(parts[0])
+        minutes, _ := strconv.Atoi(parts[1])
+        return hours * 60 + minutes
+    }
+    return 0
+}
+
+func getTodaysSeances(schedule []scheduleStruct) (message string) {
+    tz, _ := time.LoadLocation("Europe/Kiev")
+    ttz := time.Now().In(tz)
+    if (len(schedule) > 0) {
+        for _, item := range schedule {
+            startTime := timeToMinutes(item.Time)
+            if (startTime > 0 && startTime > ttz.Hour() * 60 + ttz.Minute()) {
+                message = concat(message, item.Time, " ", item.Price, "\n")
+            }
+        }
+    }
+    return
+}
+
+func getTodayMessage() (message string) {
+    films := searchFilms(bson.M{"status": "current"})
+    today := strconv.Itoa(int(time.Now().Weekday()))
+    if (len(films) > 0) {
+        for _, film := range films {
+            if (film.Schedule[today] != nil) {
+                seances := getTodaysSeances(film.Schedule[today])
+                if (seances != "") {
+                    message = concat(message, "*", film.Result.Title, "* (", fmt.Sprintf("%.1f", film.AvgRate),
+                        ")\u2606\n", seances, "/info", commandDelimiter, film.Result.ID, "\n\n")
+                }
+            }
+        }
+    }
+    if message == "" {
+        message = "Сегодня все сеансы уже закончились."
+    }
+    return
+}
+
+func broadcast(msg string) string{
+    count := 0
+    users := []userStruct{}
+    session := getSession()
+    defer session.Close()
+    c := session.DB(conf.MongoDB).C("Users")
+    c.Find(bson.M{}).All(&users)
+    for _, user := range users{
+        fmt.Println(user.TelegramId)
+        count++
+    }
+    return strconv.Itoa(count)
 }
 
 func main() {
@@ -512,24 +583,25 @@ func main() {
     if err != nil {
         panic(err)
     }
-    if conf.FilmsUpdateFreequency != "" {
-        c := cron.New()
-        c.AddFunc(conf.FilmsUpdateFreequency, func() {
-            log("Updating films start")
-            updateFilms()
-            log("Updating films end")
-        })
-        c.Start()
-    }
+    //if conf.FilmsUpdateFreequency != "" {
+    //    c := cron.New()
+    //    c.AddFunc(conf.FilmsUpdateFreequency, func() {
+    //        log("Updating films start")
+    //        updateFilms()
+    //        log("Updating films end")
+    //    })
+    //    c.Start()
+    //}
 
-    log(fmt.Sprintf("Authorized on account %s",bot.Self.UserName))
+    log(fmt.Sprintf("Authorized on account %s", bot.Self.UserName))
 
     u := tgbotapi.NewUpdate(0)
     u.Timeout = 60
 
     updates, _ := bot.GetUpdatesChan(u)
-
     for update := range updates {
+
+
         command := update.Message.Command()
         args := getCommandArguments(update.Message)
         msg := tgbotapi.NewMessage(update.Message.Chat.ID, "")
@@ -537,7 +609,13 @@ func main() {
         user = userStruct{
             Type: update.Message.Chat.Type,
             TelegramId: update.Message.Chat.ID,
-            Name: update.Message.Chat.UserName}
+            Name: update.Message.Chat.UserName,
+            IsAdmin: false}
+
+        if InSlice(update.Message.Chat.ID, conf.Admins) {
+            user.IsAdmin = true
+        }
+
         if (user.isSubscribed()) {
             switch command {
             case "all" : msg.Text = getAllMessage()
@@ -564,6 +642,16 @@ func main() {
             case "stop":
                 user.unsubscribe()
                 msg.Text = "Вы больше не будете получать сообщения от бота"
+            case "today": msg.Text = concat(getTodayMessage(), getFooterLinks())
+            case "broadcast":
+                if user.IsAdmin {
+                    if args!="" {
+                        msg.Text = broadcast(args)
+                    }else{
+                        msg.Text = "Укажите сообщение для отправки."
+                    }
+
+                }
             }
 
             if msg.Text == "" {

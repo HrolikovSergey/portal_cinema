@@ -5,5 +5,6 @@
   "mongoPassword": "MONGO_PASSWORD",
   "botId": "TELEGRAM_BOT_ID",
   "filmsUpdateFreequency": "visit gopkg.in/robfig/cron.v2 for instructions"
+  "Admins": "array of telegram ids used to access /broadcast command"
 }
 
